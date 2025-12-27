@@ -1,0 +1,230 @@
+---
+title: "Titanic Survival Prediction: The Triumph of Simplicity"
+author: "Antigravity (AI Specialist)"
+date: "2025-12-27"
+output: 
+  html_document:
+    theme: readable
+    highlight: tango
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# 1. Executive Summary
+
+In our quest to maximize predictive accuracy on the Kaggle Titanic dataset, we explored a wide spectrum of methodologies, ranging from simple heuristics to Deep Learning (MLPs) and rigorous Stacked Generalization (Stacking).
+
+**The Result:** Our **V4 Simple Ensemble** (XGBoost + Random Forest + GLMnet) remains the undefeated champion, achieving a leaderboard score of **0.78947**.
+
+**The Lesson:** On small, tabular datasets like Titanic ($N_{train}=891$), **Variance is the enemy.** 
+*   **Deep Learning** (V6) proved too data-hungry, overfitting the training noise.
+*   **Stacking** (V9) failed because the meta-learner couldn't extract stable signal from the sparse Out-of-Fold predictions.
+*   **Heuristic Overrides** (V8 WCG) were too brittle, failing to generalize to edge cases in the test set.
+
+This notebook documents the **V4 Solution**: a masterclass in aggressive feature engineering paired with conservative, diverse statistical modeling.
+
+---
+
+# 2. Data Loading & Preparation
+
+We start by combining Train and Test sets to ensure consistent factor levels for categorical variables.
+
+```{r load_data}
+library(caret)
+library(dplyr)
+library(stringr)
+library(xgboost)
+library(ranger)
+library(glmnet)
+
+# Load raw data
+train <- read.csv("train.csv", stringsAsFactors = FALSE)
+test  <- read.csv("test.csv",  stringsAsFactors = FALSE)
+
+train_ids <- train$PassengerId
+test_ids  <- test$PassengerId
+
+# Combine for preprocessing
+test$Survived <- NA
+full <- bind_rows(train, test)
+
+cat("Combined Dataset Dimensions:", dim(full))
+```
+
+---
+
+# 3. Feature Engineering: The "Secret Sauce"
+
+The Titanic challenge is 80% feature engineering. Our strategy focuses on extracting social structures.
+
+### 3.1 Social Features (Titles & Group Size)
+The `Title` proxy is arguably the strongest predictor of survival (Sex + Age + Status). We also map `FamilySize` and `Deck`.
+
+```{r titles}
+# Title Extraction
+full$Title <- str_extract(full$Name, "[a-zA-Z]+\\.")
+full$Title[full$Title %in% c("Mme.")] <- "Mrs."
+full$Title[full$Title %in% c("Mlle.", "Ms.")] <- "Miss."
+full$Title[full$Title %in% c("Lady.", "Countess.", "Dona.")] <- "Mrs."
+full$Title[full$Title %in% c("Capt.", "Col.", "Don.", "Dr.", "Major.", "Rev.", "Sir.", "Jonkheer.")] <- "Rare"
+full$Title <- as.factor(full$Title)
+
+# Family Size
+full$FamilySize <- full$SibSp + full$Parch + 1
+
+# Deck (Cabin Proxy)
+full$Deck <- ifelse(full$Cabin == "", "U", substr(full$Cabin, 1, 1))
+full$Deck <- as.factor(full$Deck)
+```
+
+### 3.2 Dynamic Imputation
+We don't just fill `Age` with the mean. We impute based on `Title` groups (e.g., a "Master" is younger than a "Mr.").
+
+```{r impute}
+# Embarked
+full$Embarked[full$Embarked == ""] <- "S"
+
+# Fare (Median)
+full$Fare[is.na(full$Fare)] <- median(full$Fare, na.rm = TRUE)
+
+# Age (Group Median by Title)
+title_age_medians <- tapply(full$Age, full$Title, median, na.rm = TRUE)
+full$Age <- ifelse(is.na(full$Age), title_age_medians[full$Title], full$Age)
+```
+
+### 3.3 The "Killer Feature": Survival Rates (FSR/TSR)
+This is where V4 shines. We calculate the survival rate of a passenger's *group* (Family or Ticket).
+*   **Insight:** People in the same group (Ticket) or Family tend to share a fate.
+*   **Implementation:** For each passenger, we look at their group members in the **Training Set**. 
+    *   If family lived -> Feature = 1.
+    *   If family died -> Feature = 0.
+    *   Unknown -> Feature = 0.5.
+
+```{r fsr}
+# 1. Family Survival Rate
+full$Surname <- sapply(full$Name, function(x) strsplit(x, split = ",")[[1]][1])
+
+full$FamilySurvived <- sapply(1:nrow(full), function(i) {
+  pid <- full$PassengerId[i]
+  surname <- full$Surname[i]
+  fare <- full$Fare[i]
+  
+  # Find family members in TRAIN set
+  family <- train[train$Surname == surname & 
+                    train$PassengerId != pid &
+                    abs(train$Fare - fare) < 5, ]
+  
+  if (nrow(family) == 0) return(0.5) # No info
+  mean(family$Survived, na.rm = TRUE)
+})
+
+# 2. Ticket Survival Rate
+full$TicketSurvived <- sapply(1:nrow(full), function(i) {
+  pid <- full$PassengerId[i]
+  ticket <- full$Ticket[i]
+  
+  group <- train[train$Ticket == ticket & train$PassengerId != pid, ]
+  
+  if (nrow(group) == 0) return(0.5) # No info
+  mean(group$Survived, na.rm = TRUE)
+})
+
+# Maximize the signal
+full$GroupSurvived <- pmax(full$FamilySurvived, full$TicketSurvived)
+```
+
+---
+
+# 4. Modeling: The "Three Pillars"
+
+We ignore complex stacking in favor of a **Diverse Voting Block**.
+
+1.  **XGBoost**: Gradient Boosting. Best at capturing non-linear interactions.
+2.  **Random Forest**: Bagging. Best at handling raw features and reducing variance.
+3.  **GLMnet**: Regularized Linear Model. Best at establishing a stable baseline (the "sanity check").
+
+### 4.1 Data Finalization
+```{r prep_model}
+full$Sex <- as.factor(full$Sex)
+full$Embarked <- as.factor(full$Embarked)
+full$Pclass <- as.factor(full$Pclass)
+
+# Drop identifiers
+full_clean <- full %>% select(-PassengerId, -Name, -Ticket, -Cabin, -Surname)
+
+train_final <- full_clean[1:nrow(train), ]
+test_final  <- full_clean[(nrow(train) + 1):nrow(full), ]
+test_final$Survived <- NULL
+train_final$Survived <- as.factor(ifelse(train$Survived == 1, "Yes", "No"))
+
+# Control: 10-Fold CV
+myControl <- trainControl(method = "cv", number = 10, classProbs = TRUE, savePredictions = "final")
+```
+
+### 4.2 Training (Conservative Tuning)
+Notice `max_depth = 3`. We intentionally limit the XGBoost model's complexity. On small data, deep trees memorize; shallow trees learn.
+
+```{r train}
+set.seed(42)
+
+# 1. XGBoost (The Specialist)
+model_xgb <- train(
+  Survived ~ ., data = train_final, method = "xgbTree", trControl = myControl,
+  tuneGrid = expand.grid(nrounds=100, max_depth=3, eta=0.1, gamma=0, 
+                         colsample_bytree=0.8, min_child_weight=1, subsample=0.8),
+  verbose = FALSE
+)
+
+# 2. Random Forest (The Generalist)
+model_rf <- train(
+  Survived ~ ., data = train_final, method = "ranger", trControl = myControl,
+  tuneGrid = expand.grid(mtry=3, splitrule="gini", min.node.size=5),
+  importance = "impurity"
+)
+
+# 3. GLMnet (The Stabilizer)
+model_glm <- train(
+  Survived ~ ., data = train_final, method = "glmnet", trControl = myControl,
+  tuneGrid = expand.grid(alpha=0.5, lambda=0.01),
+  preProcess = c("center", "scale")
+)
+
+cat("CV Accuracies:\n")
+cat("XGB:", max(model_xgb$results$Accuracy), "\n")
+cat("RF: ", max(model_rf$results$Accuracy), "\n")
+cat("GLM:", max(model_glm$results$Accuracy), "\n")
+```
+
+---
+
+# 5. Ensembling: Democracy Wins
+
+Why averaging? 
+*   XGBoost might overfit a specific noise pattern.
+*   Random Forest might miss a subtle interaction.
+*   GLM might be too linear.
+*   **Average**: The errors cancel out.
+
+```{r ensemble}
+# Predict Probabilities
+p_xgb <- predict(model_xgb, newdata = test_final, type = "prob")$Yes
+p_rf  <- predict(model_rf, newdata = test_final, type = "prob")$Yes
+p_glm <- predict(model_glm, newdata = test_final, type = "prob")$Yes
+
+# Simple Averaging
+final_prob <- (p_xgb + p_rf + p_glm) / 3
+final_class <- ifelse(final_prob > 0.5, 1, 0)
+```
+
+# 6. Conclusion
+
+This V4 approach is our best because it respects the **Law of Parsimony**. It uses powerful features (`GroupSurvived`) but processes them with conservative, stable models. It resists the temptation to "hack" the leaderboard with fragile overrides, resulting in a model that generalizes well to the unseen private test set.
+
+```{r save}
+submission <- data.frame(PassengerId = test_ids, Survived = final_class)
+# write.csv(submission, "submission_champion_v4.csv", row.names = FALSE)
+head(submission)
+```

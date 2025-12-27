@@ -1,0 +1,423 @@
+---
+title: "Titanic Survival Analysis with Neural Networks"
+output: html_notebook
+---
+
+# Introduction
+This script represents my continued exploration of the Titanic dataset, aiming to enhance the predictive accuracy of survival outcomes for passengers aboard the ill-fated ship. Building upon my initial model, which achieved approximately 70% accuracy, this iteration seeks to delve deeper into the dataset by employing a more sophisticated approach to data exploration, handling missing values, and engineering insightful features. By leveraging advanced data manipulation techniques and machine learning models, this project aspires to uncover hidden patterns and improve the robustness of predictions. The ultimate goal is to surpass previous performance benchmarks and gain a more comprehensive understanding of the factors influencing survival, as part of the ongoing Kaggle Titanic competition.
+
+## Files
+* `gender_submission.csv`: example of what the final submitted file should look like with two columns: `PassengerID` and `Survived`.
+* `train.csv`: labeled data (`Survived`) used to build the model. 11 columns
+* `test.csv`: 12 columns
+
+## Data dictionary
+
+| Variable	| Definition | Key | Notes |
+| --- | --- | --- | --- |
+| survival	| Survival	| 0 = No, 1 = Yes | --- |
+| pclass	| Ticket class	| 1 = 1st, 2 = 2nd, 3 = 3rd | Proxy for SES- 1st=upper, 2nd=middle, 3rd=lower |
+| sex	| Sex | --- | --- |
+| Age	| Age in years | --- | Age is fractional if less than 1. If the age is estimated, is it in the form of xx.5 |
+| sibsp	| # of siblings / spouses aboard the Titanic | --- | Sibling = brother, sister, stepbrother, stepsister; Spouse = husband, wife (mistresses and fiancés were ignored) |
+| parch	| # of parents / children aboard the Titanic | --- | Parent = mother/father, Spouse = husband, wife (mistresses and fiances ignored). Some children travelled only with a nanny, therefore parch=0 for them. |
+| ticket | Ticket number | --- | --- |
+| fare	| Passenger fare | --- | --- |
+| cabin	| Cabin number | --- | --- |
+| embarked | Port of Embarkation | C = Cherbourg, Q = Queenstown, S = Southampton | --- ||mpton | --- |
+
+```{r}
+# Load packages
+library(caret)        # machine learning
+library(dplyr)        # data manipulation
+library(ggplot2)      # viz
+library(Hmisc)        # robust describe() function
+library(naniar)       # working with missing data
+library(randomForest) # inference model
+
+# Load train and test data
+train <- read.csv("train.csv", stringsAsFactors = FALSE)
+test <- read.csv("test.csv", stringsAsFactors = FALSE)
+head(train) #--loaded successfully
+head(test)  #--loaded successfully
+
+# Evaluate structure and data types
+# str(train)
+# str(test)
+# 
+# describe(train)
+# train has missing values: Age 177, Cabin 687, Embarked 2
+# describe(test)
+# test has missing values: Cabin 327, Fare 1, Age 86
+```
+
+```{r}
+# DATA CLEANING AND PREPROCESSING
+# 1) Encode categorical variables
+# [X] Encode Sex as numeric factor
+train$Sex <- as.numeric(ifelse(train$Sex == "male", 1, 0)) # v2.2 added as.factor() to coerce output
+test$Sex <- as.numeric(ifelse(test$Sex == "male", 1, 0))
+head(train[, "Sex"]) #--encoded successfully
+head(test[, "Sex"]) #--encoded successfully
+```
+
+
+```{r}
+# [X] Convert Pclass to an ordinal factor
+train$Pclass <- as.numeric(factor(train$Pclass, levels = c(1, 2, 3), ordered = TRUE))
+test$Pclass <- as.numeric(factor(test$Pclass, levels = c(1, 2, 3), ordered = TRUE))
+head(train[, "Pclass"]) #--encoded successfully
+head(test[, "Pclass"]) #--encoded successfully
+```
+
+```{r}
+# [X] One-hot encode Embarked
+embarked_train_one_hot <- model.matrix(~ Embarked - 1, data = train)
+embarked_test_one_hot <- model.matrix(~ Embarked - 1, data = test)
+
+# Add the one-hot encoded columns back to the dataset
+train <- cbind(train, embarked_train_one_hot)
+test <- cbind(test, embarked_test_one_hot)
+
+# Verify encoding:
+#head(train[, c("Embarked", "EmbarkedC", "EmbarkedQ", "EmbarkedS")])
+#head(test[, c("Embarked", "EmbarkedC", "EmbarkedQ", "EmbarkedS")])
+
+# -- looks perfect, let's not forget about imputing our 2 missing values
+# Impute 2 missing Embarked values with the mode
+train$Embarked[train$Embarked == ""] <- NA
+embarked_mode <- names(sort(table(train$Embarked), decreasing = TRUE))
+train$Embarked[is.na(train$Embarked)] <- embarked_mode
+
+# verify imputation
+describe(train$Embarked)
+```
+
+```{r}
+##v2.2 also want to explicitly cast the values in EmbarkedC, EmbarkedQ, and EmbarkedS as factors.
+train$EmbarkedC <- as.numeric(as.factor(train$EmbarkedC))
+test$EmbarkedC <- as.numeric(as.factor(test$EmbarkedC))
+train$EmbarkedQ <- as.numeric(as.factor(train$EmbarkedQ))
+test$EmbarkedQ <- as.numeric(as.factor(test$EmbarkedQ))
+train$EmbarkedS <- as.numeric(as.factor(train$EmbarkedS))
+test$EmbarkedS <- as.numeric(as.factor(test$EmbarkedS))
+
+## SibSp and Parch should be integers
+train$SibSp <- as.numeric(train$SibSp)
+test$SibSp <- as.numeric(test$SibSp)
+train$Parch <- as.numeric(train$Parch)
+test$Parch <- as.numeric(test$Parch)
+
+# Survived needs to be a factor
+train$Survived <- as.numeric(as.factor(train$Survived))
+```
+
+```{r}
+# 3) Address missing values
+# Age - Train
+#--Predict missing ages using other features
+train_age_data <- train %>% 
+    select(Age, Pclass, Sex, SibSp, Parch, Fare, EmbarkedC, EmbarkedQ, EmbarkedS)
+
+# head(train[, c("Age", "Pclass", "Sex", "SibSp", "Parch", "Fare", "EmbarkedC", "EmbarkedQ", "EmbarkedS")])
+#--verified that all these columns are formatted properly
+
+train_age_complete <- train_age_data %>% filter(!is.na(Age))
+train_age_missing <- train_age_data %>% filter(is.na(Age))
+
+set.seed(666)
+cv_control <- trainControl(method = "cv", number = 10) #v2.2 10-fold cross-validation for imputing missing ages
+train_age_cv_model <- train(
+  Age ~ Pclass + Sex + SibSp + Parch + Fare + EmbarkedC + EmbarkedQ + EmbarkedS,
+  data = train_age_complete,
+  method = "rf",
+  trControl = cv_control,
+  tuneLength = 3
+)
+print(train_age_cv_model)
+```
+
+```{r}
+# Use the best model to predict missing ages
+predicted_train_ages <- predict(train_age_cv_model, newdata = train_age_missing)
+
+# Impute the predicted ages back into the train dataset
+train$Age[is.na(train$Age)] <- predicted_train_ages
+describe(train$Age)
+```
+
+
+```{r}
+#--Age in test data
+# Preprocess the test data for Age imputation
+test_age_data <- test %>% 
+  select(Age, Pclass, Sex, SibSp, Parch, Fare, EmbarkedC, EmbarkedQ, EmbarkedS)
+
+test_age_missing <- test_age_data %>% filter(is.na(Age))
+test_age_complete <- test_age_data %>% filter(!is.na(Age))
+
+# Use the trained train_age_cv_model to predict missing ages in the test dataset
+predicted_test_ages <- predict(train_age_cv_model, newdata = test_age_missing)
+
+# Impute the predicted ages back into the test dataset
+test$Age[is.na(test$Age)] <- predicted_test_ages
+
+n_miss(test$Age)
+```
+
+```{r}
+library(stringr)
+
+## Feature Engineering - transform Name into Title
+# Update the regex pattern to include all titles
+title_pattern <- "Mr|Mrs|Miss|Master|Don|Rev|Dr|Mme|Ms|Major|Lady|Sir|Mlle|Col|Capt|Countess|Jonkheer"
+
+# Extract titles using the regex title_pattern
+train$Title <- as.factor(str_extract(train$Name, title_pattern))
+test$Title <- as.factor(str_extract(test$Name, title_pattern))
+
+str(train)
+str(test)
+```
+
+```{r}
+# Convert empty strings to NA in Cabin
+train$Cabin[train$Cabin == ""] <- NA
+test$Cabin[test$Cabin == ""] <- NA
+
+# Create new `Deck` feature
+train$Deck <- as.factor(ifelse(!is.na(train$Cabin), substr(train$Cabin, 1, 1), "U"))
+test$Deck <- as.factor(ifelse(!is.na(test$Cabin), substr(test$Cabin, 1, 1), "U"))
+
+# Verify the new Cabin and Deck features
+head(train[, c("Cabin", "Deck")])
+head(test[, c("Cabin", "Deck")])
+```
+
+```{r}
+# Encode the HasCabin variable:
+train$HasCabin <- as.numeric(as.factor(ifelse(!is.na(train$Cabin), 1, 0)))
+test$HasCabin <- as.numeric(as.factor(ifelse(!is.na(test$Cabin), 1, 0)))
+
+# describe(train$HasCabin) # - perfect
+head(train[, c("Cabin", "HasCabin")])  #looks good
+head(test[, c("Cabin", "HasCabin")]) 
+
+n_miss(train$HasCabin)
+n_miss(test$HasCabin)
+```
+
+```{r}
+# Create the FamilySize feature
+train$FamilySize <- as.numeric(train$SibSp + train$Parch + 1)
+test$FamilySize <- as.numeric(test$SibSp + test$Parch + 1)
+
+# Inspect the new feature
+head(train[, "FamilySize"])
+head(test[, "FamilySize"])
+
+# describe(train)
+# describe(test)
+#--test still has 1 missing fare - impute with the median
+test$Fare[is.na(test$Fare)] <- median(test$Fare, na.rm = TRUE)
+describe(test)
+```
+
+```{r}
+# drop `Embarked` here because it was causing a duplicate column error
+train <- train %>% select(-Embarked)
+test <- test %>% select(-Embarked)
+
+# Create the GroupSize feature based on Ticket
+train$GroupSize <- train %>%
+  group_by(Ticket) %>%
+  mutate(GroupSize = n()) %>%
+  ungroup() %>%
+  pull(GroupSize)
+
+test$GroupSize <- test %>%
+  group_by(Ticket) %>%
+  mutate(GroupSize = n()) %>%
+  ungroup() %>%
+  pull(GroupSize)
+
+train$GroupSize <- as.numeric(train$GroupSize)
+test$GroupSize <- as.numeric(test$GroupSize)
+
+# Inspect the new feature
+head(train[, c("Ticket", "GroupSize")])
+head(test[, c("Ticket", "GroupSize")])
+```
+
+```{r}
+# Create the FarePerPerson feature
+train$FarePerPerson <- as.numeric(train$Fare / train$GroupSize)
+test$FarePerPerson <- as.numeric(test$Fare / test$GroupSize)
+
+# Inspect the new feature
+head(train[, c("Ticket", "Fare", "GroupSize", "FarePerPerson")])
+head(test[, c("Ticket", "Fare", "GroupSize", "FarePerPerson")])
+```
+
+```{r}
+# Apply log transformation to Fare and FarePerPerson
+#--plot shape before transformation?
+ggplot(train, aes(x = Fare)) +
+  geom_histogram(bins=20) +
+  theme_minimal() +
+  ggtitle("Fare (before transforming)")
+
+#--note an extreme outlier over 500!
+train$Fare <- log(train$Fare + 1)
+train$FarePerPerson <- log(train$FarePerPerson + 1)
+test$Fare <- log(test$Fare + 1)
+test$FarePerPerson <- log(test$FarePerPerson + 1)
+head(train[, c("Fare", "FarePerPerson")])
+head(test[, c("Fare", "FarePerPerson")])
+
+ggplot(train, aes(x = Fare)) +
+  geom_histogram(bins=20) +
+  theme_minimal() +
+  ggtitle("Log Transformed Fare")
+```
+
+```{r}
+ggplot(train, aes(x = FarePerPerson)) +
+  geom_histogram(bins=20) +
+  theme_minimal() +
+  ggtitle("Log Transformed FarePerPerson")
+```
+
+```{r}
+str(train)
+str(test)
+```
+
+```{r}
+# Create the ChildInFamily feature
+train$ChildInFamily <- as.numeric(as.factor(ifelse(train$Age < 15 & train$FamilySize > 1, 1, 0)))
+test$ChildInFamily <- as.numeric(as.factor(ifelse(test$Age < 15 & test$FamilySize > 1, 1, 0)))
+
+# Inspect the new feature
+head(train[, c("Age", "FamilySize", "ChildInFamily")])
+head(test[, c("Age", "FamilySize", "ChildInFamily")])
+```
+```{r}
+# Fixing Data Type Issues in Titanic Keras Model
+
+# Ensure Survived is properly formatted
+train$Survived <- as.factor(train$Survived)
+y_train <- as.numeric(as.character(train$Survived))
+
+# Ensure all categorical features are converted to numeric
+train$Pclass <- as.numeric(train$Pclass)
+test$Pclass <- as.numeric(test$Pclass)
+
+train$Sex <- as.numeric(train$Sex)
+test$Sex <- as.numeric(test$Sex)
+
+train$EmbarkedC <- as.numeric(train$EmbarkedC)
+test$EmbarkedC <- as.numeric(test$EmbarkedC)
+
+train$EmbarkedQ <- as.numeric(train$EmbarkedQ)
+test$EmbarkedQ <- as.numeric(test$EmbarkedQ)
+
+train$EmbarkedS <- as.numeric(train$EmbarkedS)
+test$EmbarkedS <- as.numeric(test$EmbarkedS)
+
+# Fix HasCabin encoding
+train$HasCabin <- as.numeric(!is.na(train$Cabin))
+test$HasCabin <- as.numeric(!is.na(test$Cabin))
+
+# Normalize Fare and Age
+train$Fare <- scale(train$Fare)
+test$Fare <- scale(test$Fare)
+
+train$Age <- scale(train$Age)
+test$Age <- scale(test$Age)
+
+train$FarePerPerson <- scale(train$FarePerPerson)
+test$FarePerPerson <- scale(test$FarePerPerson)
+
+# Drop unnecessary columns
+train <- train %>% select(-Name, -Ticket, -Cabin)
+test <- test %>% select(-Name, -Ticket, -Cabin)
+
+# Convert features to numeric matrix
+x_train <- as.matrix(sapply(train %>% select(-Survived), as.numeric))
+x_test <- as.matrix(sapply(test, as.numeric))
+
+y_train <- as.numeric(train$Survived)
+
+# Ensure no missing values
+if (any(is.na(x_train)) || any(is.na(y_train))) {
+  stop("Missing values detected in x_train or y_train. Please clean the data.")
+}
+
+# Ensure x_train is a proper numeric matrix
+if (!is.matrix(x_train)) {
+  stop("x_train is not a matrix. Check feature selection and conversions.")
+}
+
+if (!all(sapply(x_train, is.numeric))) {
+  stop("Non-numeric columns detected in x_train. Check data preprocessing.")
+}
+  stop("Missing values detected in training data. Please handle missing values before training.")
+}
+
+# Check structure before training
+str(x_train)
+str(y_train)
+```
+
+```{r}
+# Load necessary libraries
+library(keras)
+
+# Convert features to numeric matrices:
+# For training data, drop the 'Survived' column (which is the target)
+x_train <- as.matrix(sapply(train[, setdiff(names(train), "Survived")], as.numeric))
+y_train <- as.numeric(as.character(train$Survived))
+
+# For test data, use all columns as features (assuming test does not have 'Survived')
+x_test <- as.matrix(sapply(test, as.numeric))
+
+# (Optional) Check dimensions to verify they match expected input sizes
+cat("x_train shape:", dim(x_train), "\n")
+cat("x_test shape:", dim(x_test), "\n")
+
+# Define the model using the Functional API (explicit Input layer)
+inputs <- layer_input(shape = c(ncol(x_train)))
+outputs <- inputs %>%
+  layer_dense(units = 64, activation = "relu") %>%
+  layer_dropout(rate = 0.4) %>%
+  layer_dense(units = 32, activation = "relu") %>%
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 1, activation = "sigmoid")  # Using 'sigmoid' for binary classification
+
+model <- keras_model(inputs = inputs, outputs = outputs)
+
+# Compile the model
+model$compile(
+  optimizer = optimizer_adam(),
+  loss = "binary_crossentropy",  # Binary crossentropy for classification
+  metrics = list("accuracy")
+)
+
+# Train the model
+history <- model$fit(
+  x_train, y_train,
+  epochs = 30,
+  batch_size = 32,
+  validation_split = 0.2
+)
+
+# Predict on the test set
+predictions <- model$predict(x_test)
+
+# Convert predictions to binary (0/1) values using a 0.5 threshold and update the test dataset
+test$Survived <- ifelse(predictions > 0.5, 1, 0)
+
+# Check the first 40 predictions
+head(test$Survived, 40)
+```
