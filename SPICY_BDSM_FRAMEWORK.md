@@ -5,6 +5,20 @@
 ---
 
 ```
+╔═══════════════════════════════════════════════════════════════════╗
+║                                                                   ║
+║   SPICY: Self-Perfecting through Iterative Critique Yielding     ║
+║                                                                   ║
+║   BDSM:  Beneficial Dialectic for Self-Mastery                   ║
+║                                                                   ║
+╚═══════════════════════════════════════════════════════════════════╝
+```
+
+*Savor it.*
+
+---
+
+```
      "There is no forgiveness. Not in 100,000 years."
                     — The Eternal Law
 ```
