@@ -2,7 +2,10 @@
   "mcpServers": {
     "poke": {
       "type": "sse",
-      "url": "https://api.poke.ai/mcp"
+      "url": "https://api.poke.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer ${POKE_API_KEY}"
+      }
     }
   }
 }
