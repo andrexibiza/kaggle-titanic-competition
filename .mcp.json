@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "poke": {
+      "type": "sse",
+      "url": "https://api.poke.ai/mcp"
+    }
+  }
+}
