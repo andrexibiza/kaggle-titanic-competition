@@ -1,0 +1,22 @@
+name: Automatic Copilot review
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  request-review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request Copilot review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api --method POST             "repos/${GH_REPO}/pulls/${PR_NUMBER}/requested_reviewers"             -f 'reviewers[]=copilot-pull-request-reviewer[bot]'
