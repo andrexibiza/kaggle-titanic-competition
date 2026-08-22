@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - .github/hermes-dependency-security-trigger
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: read
@@ -16,10 +18,14 @@ concurrency:
 jobs:
   publish:
     if: >-
-      startsWith(
-        github.event.head_commit.message,
-        'ci: trigger exact Hermes dependency-security publication'
-      )
+      (github.event_name == 'push' &&
+       startsWith(
+         github.event.head_commit.message,
+         'ci: trigger exact Hermes dependency-security publication'
+       )) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.number == 15 &&
+       github.event.comment.user.login == 'chatgpt-codex-connector[bot]')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
