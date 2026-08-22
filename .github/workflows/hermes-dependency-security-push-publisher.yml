@@ -24,7 +24,7 @@ jobs:
          'ci: trigger exact Hermes dependency-security publication'
        )) ||
       (github.event_name == 'issue_comment' &&
-       github.event.issue.number == 15 &&
+       github.event.issue.title == '[external] Trigger Hermes dependency-security publisher' &&
        github.event.comment.user.login == 'chatgpt-codex-connector[bot]')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
