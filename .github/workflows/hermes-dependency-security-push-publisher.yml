@@ -1,0 +1,47 @@
+name: Publish Hermes dependency-security graph on exact sentinel
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/hermes-dependency-security-trigger
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-dependency-security-push-publisher
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      startsWith(
+        github.event.head_commit.message,
+        'ci: trigger exact Hermes dependency-security publication'
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ secrets.ARES_REVIEW_TOKEN }}
+
+    steps:
+      - name: Check out trusted publisher
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.22.0
+
+      - name: Use repository-authorized npm
+        run: npm install --global npm@11.17.0
+
+      - name: Set up exact uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: '0.12.5'
+          enable-cache: false
+
+      - name: Publish exact graph
+        run: python3 .github/scripts/publish-hermes-dependency-security.py
